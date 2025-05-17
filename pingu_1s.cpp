@@ -139,9 +139,9 @@ void response_receiver(int sock) {
                     received_count++;
                     
                     // Opcional: para debug/logging em baixo volume
-                    // std::string ip_str = inet_ntoa(sender.sin_addr);
-                    // std::lock_guard<std::mutex> lock(cout_mutex);
-                    // std::cout << "Resposta de " << ip_str << std::endl;
+                 std::string ip_str = inet_ntoa(sender.sin_addr);
+                 std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << "Resposta de " << ip_str << std::endl;
                 }
             }
         }

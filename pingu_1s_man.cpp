@@ -113,35 +113,44 @@ void turbo_sender(int sock) {
     }
 }
 
-// Thread para receber respostas
-void response_receiver(int sock) {
+// Função para processar respostas de forma síncrona
+void process_responses(int sock) {
     char buffer[1500];
     struct sockaddr_in sender;
     socklen_t sender_len = sizeof(sender);
     
+    // Define um timeout para o recvfrom
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000; // 100ms
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    
     while (!should_stop) {
-        // Recebe pacotes o mais rápido possível
+        // Tenta receber pacotes
         ssize_t received = recvfrom(sock, buffer, sizeof(buffer), 0, 
                                    (struct sockaddr*)&sender, &sender_len);
         
-        if (received > 0) {
-            // Verifica se é uma resposta ICMP Echo Reply
-            struct ip* ip_header = (struct ip*)buffer;
-            int ip_header_len = ip_header->ip_hl * 4;
+        if (received <= 0) {
+            // Timeout ou erro
+            continue;
+        }
+        
+        // Verifica se é uma resposta ICMP Echo Reply
+        struct ip* ip_header = (struct ip*)buffer;
+        int ip_header_len = ip_header->ip_hl * 4;
+        
+        if (received >= ip_header_len + sizeof(icmphdr)) {
+            struct icmphdr* icmp = (struct icmphdr*)(buffer + ip_header_len);
             
-            if (received >= ip_header_len + sizeof(icmphdr)) {
-                struct icmphdr* icmp = (struct icmphdr*)(buffer + ip_header_len);
+            if (icmp->type == ICMP_ECHOREPLY && 
+                ntohs(icmp->un.echo.id) == 0x1234) {
+                received_count++;
                 
-                if (icmp->type == ICMP_ECHOREPLY && 
-                    ntohs(icmp->un.echo.id) == 0x1234) {
-                    received_count++;
-                    
-                    // Exibe o IP que respondeu
-                    if (SHOW_REPLIES) {
-                        std::string ip_str = inet_ntoa(sender.sin_addr);
-                        std::lock_guard<std::mutex> lock(cout_mutex);
-                        std::cout << "✅ Resposta de: " << ip_str << std::endl;
-                    }
+                // Exibe o IP que respondeu
+                if (SHOW_REPLIES) {
+                    std::string ip_str = inet_ntoa(sender.sin_addr);
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cout << "✅ Resposta de: " << ip_str << std::endl;
                 }
             }
         }
@@ -243,17 +252,18 @@ int main(int argc, char* argv[]) {
         std::cout << "\nIniciando escaneamento em 1 segundo...\n" << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(1));
         
-        // Inicia thread de recepção
-        std::thread receiver_thread(response_receiver, sock);
-        
         // Prepara as threads de envio
         std::vector<std::thread> sender_threads;
+        
+        // Iniciar cronômetro para controlar o tempo exato de 1 segundo
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
+        // Inicia as threads de envio
         for (int i = 0; i < NUM_SENDER_THREADS; i++) {
             sender_threads.emplace_back(turbo_sender, sock);
         }
         
-        // Cronômetro: exatamente 1 segundo
-        auto start_time = std::chrono::high_resolution_clock::now();
+        // Aguarda exatamente 1 segundo e então para o envio
         std::this_thread::sleep_for(std::chrono::seconds(1));
         should_stop = true;
         
@@ -262,15 +272,27 @@ int main(int argc, char* argv[]) {
             t.join();
         }
         
-        // Aguarda um pouco mais para coletar respostas finais
-        std::cout << "\nAguardando respostas finais..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        
-        // Finaliza a thread de recepção
-        receiver_thread.join();
-        
+        // Registra o fim do tempo de envio
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        
+        // Processa respostas de forma síncrona após o término do envio
+        std::cout << "\nProcessando respostas..." << std::endl;
+        
+        // Define um tempo limite para processar as respostas (500ms)
+        auto process_start = std::chrono::high_resolution_clock::now();
+        auto process_timeout = std::chrono::milliseconds(500);
+        should_stop = false;
+        
+        while (!should_stop) {
+            process_responses(sock);
+            
+            // Verifica se o tempo de processamento chegou ao limite
+            auto now = std::chrono::high_resolution_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - process_start) >= process_timeout) {
+                should_stop = true;
+            }
+        }
         
         // Mostra resultados finais
         uint64_t total_sent = sent_count.load();
